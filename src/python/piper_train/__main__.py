@@ -12,6 +12,13 @@ from .vits.lightning import VitsModel
 _LOGGER = logging.getLogger(__package__)
 
 
+def load_checkpoint_fix(checkpoint_path):
+    """
+    Loads a checkpoint with weights_only=False to avoid UnpicklingError.
+    """
+    return torch.load(checkpoint_path, weights_only=False)
+
+
 def main():
     logging.basicConfig(level=logging.DEBUG)
 
@@ -102,6 +109,7 @@ def main():
         model_single = VitsModel.load_from_checkpoint(
             args.resume_from_single_speaker_checkpoint,
             dataset=None,
+            map_location=load_checkpoint_fix,  # Use the custom loader
         )
         g_dict = model_single.model_g.state_dict()
         for key in list(g_dict.keys()):
