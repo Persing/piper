@@ -16,8 +16,9 @@ def load_checkpoint_fix(checkpoint_path):
     """
     Loads a checkpoint with weights_only=False to avoid UnpicklingError.
     """
-    return torch.load(checkpoint_path, weights_only=False)
-
+    # Allowlist pathlib.PosixPath for checkpoint loading
+    torch.serialization.add_safe_globals([Path])
+    return torch.load(checkpoint_path, weights_only=True)
 
 def main():
     logging.basicConfig(level=logging.DEBUG)
