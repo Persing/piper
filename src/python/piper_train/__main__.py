@@ -1,12 +1,15 @@
 import argparse
 import json
 import logging
+import sys
 from pathlib import Path
 
 import torch
 from pytorch_lightning import Trainer
+from pytorch_lightning.strategies import SingleDeviceStrategy
 from pytorch_lightning.callbacks import ModelCheckpoint
 
+from piper_tts_trainer.piper.src.python.piper_train.safe_checkpoint_io import SafeCheckpointIO
 from .vits.lightning import VitsModel
 
 _LOGGER = logging.getLogger(__package__)
@@ -14,36 +17,69 @@ _LOGGER = logging.getLogger(__package__)
 
 def load_checkpoint_fix(checkpoint_path):
     """
-    Loads a checkpoint with weights_only=False to avoid UnpicklingError.
-    """
-    # Allowlist pathlib.PosixPath for checkpoint loading
-    torch.serialization.add_safe_globals([Path])
-    return torch.load(checkpoint_path, weights_only=True)
+       Loads a checkpoint with weights_only=False to avoid UnpicklingError.
+       """
+    # Explicitly allow PosixPath type
+    from pathlib import PosixPath
+    torch.serialization.add_safe_globals([PosixPath])  # <--- CHANGE TO PosixPath
+
+    # Use weights_only=False with caution
+    return torch.load(
+        checkpoint_path,
+        map_location="cpu",
+        weights_only=False  # <--- CHANGE TO FALSE BUT ADD WARNING
+    )
 
 def main():
     logging.basicConfig(level=logging.DEBUG)
 
+    # Increase Python recursion limit to handle complex data structures
+    sys.setrecursionlimit(10000)
+
     parser = argparse.ArgumentParser()
+
+    # Required arguments
+    parser.add_argument("--dataset-dir", required=True)
+    parser.add_argument("--default-root-dir", type=str, default=None,
+                        help="Root directory for saving logs and checkpoints")
+
     parser.add_argument(
-        "--dataset-dir", required=True, help="Path to pre-processed dataset directory"
+        "--resume-from-single-speaker-checkpoint",
+        type=str,
+        default=None,
+        help="Path to a single-speaker checkpoint to resume from (for multi-speaker models only)"
     )
-    parser.add_argument(
-        "--checkpoint-epochs",
-        type=int,
-        help="Save checkpoint every N epochs (default: 1)",
-    )
-    parser.add_argument(
-        "--quality",
-        default="medium",
-        choices=("x-low", "medium", "high"),
-        help="Quality/size of model (default: medium)",
-    )
-    parser.add_argument(
-        "--resume_from_single_speaker_checkpoint",
-        help="For multi-speaker models only. Converts a single-speaker checkpoint to multi-speaker and resumes training",
-    )
-    Trainer.add_argparse_args(parser)
+
+    # Training configuration
+    parser.add_argument("--resume-from-checkpoint")
+    parser.add_argument("--max-epochs", type=int, default=1000)
+
+
+    parser.add_argument("--accelerator", choices=["cpu", "gpu"], default="gpu")
+    parser.add_argument("--devices", type=int, default=1)
+
+    parser.add_argument("--quality", type=str, default="medium", choices=["low", "medium", "high"])
+
+    parser.add_argument("--checkpoint-epochs", type=int, default=1)
+    #
+    # # Add model-specific args (including batch-size)
     VitsModel.add_model_specific_args(parser)
+
+    args = parser.parse_args()
+
+    torch.set_float32_matmul_precision('medium')
+    # Configure trainer
+    trainer = Trainer(
+        accelerator=args.accelerator,
+        devices=args.devices,
+        max_epochs=args.max_epochs,
+        callbacks=[ModelCheckpoint(every_n_epochs=args.checkpoint_epochs)] if args.checkpoint_epochs else [],
+        logger=True,
+        enable_progress_bar=True,
+        num_sanity_val_steps=2,
+        precision=32
+    )
+
     parser.add_argument("--seed", type=int, default=1234)
     args = parser.parse_args()
     _LOGGER.debug(args)
@@ -56,7 +92,9 @@ def main():
     torch.manual_seed(args.seed)
 
     config_path = args.dataset_dir / "config.json"
-    dataset_path = args.dataset_dir / "dataset.jsonl"
+    dataset_path = Path(args.dataset_dir) / "dataset.jsonl"
+    if not dataset_path.exists():
+        raise FileNotFoundError(f"Dataset file {dataset_path} not found")
 
     with open(config_path, "r", encoding="utf-8") as config_file:
         # See preprocess.py for format
@@ -65,7 +103,6 @@ def main():
         num_speakers = int(config["num_speakers"])
         sample_rate = int(config["audio"]["sample_rate"])
 
-    trainer = Trainer.from_argparse_args(args)
     if args.checkpoint_epochs is not None:
         trainer.callbacks = [ModelCheckpoint(every_n_epochs=args.checkpoint_epochs)]
         _LOGGER.debug(
@@ -94,6 +131,7 @@ def main():
         num_speakers=num_speakers,
         sample_rate=sample_rate,
         dataset=[dataset_path],
+        # dataset=str(dataset_path),
         **dict_args,
     )
 
@@ -111,6 +149,7 @@ def main():
             args.resume_from_single_speaker_checkpoint,
             dataset=None,
             map_location=load_checkpoint_fix,  # Use the custom loader
+            weights_only=False
         )
         g_dict = model_single.model_g.state_dict()
         for key in list(g_dict.keys()):
@@ -130,7 +169,7 @@ def main():
             "Successfully converted single-speaker checkpoint to multi-speaker"
         )
 
-    trainer.fit(model)
+    trainer.fit(model, args.resume_from_checkpoint)
 
 
 def load_state_dict(model, saved_state_dict):

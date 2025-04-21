@@ -154,6 +154,13 @@ class VitsModel(pl.LightningModule):
         return audio
 
     def train_dataloader(self):
+        if not self._train_dataset or len(self._train_dataset) == 0:
+            raise ValueError("Training dataset is empty or not properly initialized.")
+
+        # Log dataset size and structure
+        logging.debug(f"Training dataset size: {len(self._train_dataset)}")
+        logging.debug(f"Batch size: {self.hparams.batch_size}, Num workers: {self.hparams.num_workers}")
+
         return DataLoader(
             self._train_dataset,
             collate_fn=UtteranceCollate(
